@@ -1,415 +1,79 @@
-﻿function Get-USBDrive() {
-    $USBDriveLetter = (Get-Volume | Where-Object { $_.DriveType -eq 'Removable' -and $_.FileSystemType -eq 'NTFS' }).DriveLetter
-    if ($null -eq $USBDriveLetter) {
-        #Must be using a fixed USB drive - difficult to grab drive letter from win32_diskdrive. Assume user followed instructions and used Deploy as the friendly name for partition
-        $USBDriveLetter = (Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.FileSystemType -eq 'NTFS' -and $_.FileSystemLabel -eq 'Deploy' }).DriveLetter
-        #If we didn't get the drive letter, stop the script.
-        if ($null -eq $USBDriveLetter) {
-            $errorMessage = 'Cannot find USB drive letter. If using a fixed USB drive, name the deployment partition "Deploy".'
-            WriteLog ($errorMessage + ' Exiting.')
-            Stop-Script -Message $errorMessage
+﻿### VARIABLES
+$FFUServerHost = "SERVER.example.com"
+$FFUSharePath = "\\$FFUServerHost\FFU\ExamBuild"
+$FFUDriverPath = "\\$FFUServerHost\Drivers"
+$FFUShareUser = "EXAMPLE\svc_account"
+$FFUSharePass = "Sup3rS3cr3tPa55w0rd"
+$SnipeURI = "https://assets.example.com/api/v1/hardware/byserial"
+$SnipeApiKey = "SuperSecretAPIKeyHere!!!!!"
+# $FFUCredential = New-Object -TypeName System.Management.Automation.PSCredential -argumentlist $FFUShareUser, $FFUSharePass
+
+
+function Get-FFUShare() {	
+
+    Write-Host "Mapping M: to [$FFUSharePath]"
+
+    for ($i = 1; $i -le 12; $i++) {
+        net use M: /delete /y 2>$null | Out-Null
+        net use M: $FFUSharePath /user:$FFUShareUser $FFUSharePass /persistent:yes | Out-Null
+        $NetUseResult = $LASTEXITCODE
+
+        if ($NetUseResult -eq 0 -and (Test-Path "M:\")) {
+            Write-Host "M: mapped successfully"
+            return "M:"
         }
 
+        Write-Host "Mapping attempt $i failed"
+
+        if ($i -lt 12) {
+            Start-Sleep -Seconds 5
+        }
     }
-    $USBDriveLetter = $USBDriveLetter + ":\"
-    return $USBDriveLetter
+    
+    Write-Host "Failed to map M:"
 }
 
-function Get-HardDrive() {
-    $systemInfo = Get-CimInstance -Class 'Win32_ComputerSystem'
-    $manufacturer = $systemInfo.Manufacturer
-    $model = $systemInfo.Model
-    WriteLog 'Getting Hard Drive info'
-    if ($manufacturer -eq 'Microsoft Corporation' -and $model -eq 'Virtual Machine') {
-        WriteLog 'Running in a Hyper-V VM. Getting virtual disk on Index 0 and SCSILogicalUnit 0'
-        $diskDriveCandidates = @(Get-CimInstance -Class 'Win32_DiskDrive' | Where-Object { $_.MediaType -eq 'Fixed hard disk media' `
-                    -and $_.Model -eq 'Microsoft Virtual Disk' `
-                    -and $_.Index -eq 0 `
-                    -and $_.SCSILogicalUnit -eq 0
-            })
-    }
-    else {
-        WriteLog 'Not running in a VM. Getting physical disk drive'
-        $diskDriveCandidates = @(Get-CimInstance -Class 'Win32_DiskDrive' | Where-Object { $_.MediaType -eq 'Fixed hard disk media' -and $_.Model -ne 'Microsoft Virtual Disk' })
-    }
+function Get-DriverShare() {	
 
-    # Return the array of candidates for selection in main script
-    return $diskDriveCandidates
+    Write-Host "Mapping N: to [$FFUDriverPath]"
+
+    for ($i = 1; $i -le 12; $i++) {
+        net use N: /delete /y 2>$null | Out-Null
+        net use N: $FFUDriverPath /user:$FFUShareUser $FFUSharePass /persistent:yes | Out-Null
+        $NetUseResult = $LASTEXITCODE
+
+        if ($NetUseResult -eq 0 -and (Test-Path "N:\")) {
+            Write-Host "N: mapped successfully"
+            return "N:"
+        }
+
+        Write-Host "Mapping attempt $i failed"
+
+        if ($i -lt 12) {
+            Start-Sleep -Seconds 5
+        }
+    }
+    
+    Write-Host "Failed to map N:"
 }
 
 function WriteLog($LogText) { 
     Add-Content -path $LogFile -value "$((Get-Date).ToString()) $LogText"
 }
 
-function Read-MenuSelection {
+function Stop-Script {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Prompt,
-
-        [Parameter(Mandatory = $true)]
-        [string]$InvalidInputMessage,
-
-        [Parameter()]
-        [int[]]$ValidSelections,
-
-        [Parameter()]
-        [int]$Minimum = [int]::MinValue,
-
-        [Parameter()]
-        [int]$Maximum = [int]::MaxValue,
-
-        [Parameter()]
-        [switch]$AllowSkip
+        [string]$Message
     )
-
-    do {
-        $userInput = Read-Host $Prompt
-        if ([string]::IsNullOrWhiteSpace($userInput)) {
-            Write-Host $InvalidInputMessage
-            continue
-        }
-
-        $selection = 0
-        if (-not [int]::TryParse($userInput, [ref]$selection)) {
-            Write-Host $InvalidInputMessage
-            continue
-        }
-
-        if ($AllowSkip -and $selection -eq 0) {
-            return 0
-        }
-
-        if ($PSBoundParameters.ContainsKey('ValidSelections')) {
-            if ($ValidSelections -notcontains $selection) {
-                Write-Host $InvalidInputMessage
-                continue
-            }
-        }
-        elseif ($selection -lt $Minimum -or $selection -gt $Maximum) {
-            Write-Host $InvalidInputMessage
-            continue
-        }
-
-        return $selection
-    } until ($false)
-}
-
-function Set-DiskpartAnswerFiles($DiskpartFile, $DiskID) {
-    (Get-Content $DiskpartFile).Replace('disk 0', "disk $DiskID") | Set-Content -Path $DiskpartFile
-}
-
-function Set-Computername($computername) {
-    [xml]$xml = Get-Content $UnattendFile
-    $components = $xml.unattend.settings.component
-    $found = $false
-    foreach ($component in $components) {
-        if ($component.ComputerName) {
-            $component.ComputerName = $computername
-            $found = $true
-            break
-        }
+    Write-Host "`n"
+    if (-not [string]::IsNullOrWhiteSpace($Message)) {
+        Write-Error -Message $Message
     }
-    if (-not $found) {
-        WriteLog 'ComputerName element not found in unattend.xml.'
-        throw 'ComputerName element not found in unattend.xml.'
-    }
-    $xml.Save($UnattendFile)
-    return $computername
-}
-
-function Get-UnattendComputerNameValue {
-    if ($null -eq $UnattendFile) {
-        return $null
-    }
-
-    [xml]$xml = Get-Content $UnattendFile
-    foreach ($component in $xml.unattend.settings.component) {
-        if ($component.ComputerName) {
-            return [string]$component.ComputerName
-        }
-    }
-
-    return $null
-}
-
-function Get-FFUDataPartitionDriveLetterDeploymentContext {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$WindowsPartitionRoot
-    )
-
-    $runtimeDirectory = Join-Path -Path $WindowsPartitionRoot -ChildPath 'Windows\Setup\Scripts\FFUDL'
-    $runtimeScriptPath = Join-Path -Path $runtimeDirectory -ChildPath 'Apply.ps1'
-    $manifestPath = Join-Path -Path $runtimeDirectory -ChildPath 'Manifest.json'
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-        if (Test-Path -LiteralPath $runtimeDirectory -PathType Container) {
-            throw "Data partition drive-letter runtime directory exists without a manifest at $manifestPath."
-        }
-        return $null
-    }
-
-    if (-not (Test-Path -LiteralPath $runtimeScriptPath -PathType Leaf)) {
-        throw "Data partition drive-letter manifest exists without its runtime script at $runtimeScriptPath."
-    }
-
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    if ([int]$manifest.SchemaVersion -ne 1) {
-        throw "Unsupported data partition drive-letter manifest schema version '$($manifest.SchemaVersion)'."
-    }
-    if (@($manifest.Partitions).Count -eq 0) {
-        throw 'Data partition drive-letter manifest does not contain any partitions.'
-    }
-
-    $processorArchitecture = ([string]$manifest.ProcessorArchitecture).Trim().ToLowerInvariant()
-    if ($processorArchitecture -notin @('amd64', 'arm64')) {
-        throw "Unsupported data partition drive-letter processor architecture '$processorArchitecture'."
-    }
-
-    WriteLog "Found data partition drive-letter assignment manifest with $(@($manifest.Partitions).Count) partition(s)."
-    return [pscustomobject]@{
-        RuntimeDirectory      = $runtimeDirectory
-        RuntimeScriptPath     = $runtimeScriptPath
-        ManifestPath          = $manifestPath
-        ProcessorArchitecture = $processorArchitecture
-    }
-}
-
-function Add-FFUDataPartitionDriveLetterCommandToAppliedUnattend {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$UnattendPath,
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('amd64', 'arm64')]
-        [string]$ProcessorArchitecture
-    )
-
-    $unattendNamespace = 'urn:schemas-microsoft-com:unattend'
-    $wcmNamespace = 'http://schemas.microsoft.com/WMIConfig/2002/State'
-    $unattendXml = New-Object System.Xml.XmlDocument
-    $unattendXml.PreserveWhitespace = $true
-    if (-not (Test-Path -LiteralPath $UnattendPath -PathType Leaf)) {
-        throw "Deployment unattend was not found at the expected path $UnattendPath."
-    }
-    $unattendXml.Load($UnattendPath)
-
-    $unattendRoot = $unattendXml.DocumentElement
-    if ($null -eq $unattendRoot -or $unattendRoot.LocalName -ne 'unattend' -or $unattendRoot.NamespaceURI -ne $unattendNamespace) {
-        throw "Unattend XML at $UnattendPath does not use the supported unattend root namespace."
-    }
-
-    $namespaceManager = New-Object System.Xml.XmlNamespaceManager($unattendXml.NameTable)
-    $namespaceManager.AddNamespace('un', $unattendNamespace)
-    $specializeSettings = $unattendRoot.SelectSingleNode("un:settings[@pass='specialize']", $namespaceManager)
-    if ($null -eq $specializeSettings) {
-        $specializeSettings = $unattendXml.CreateElement('settings', $unattendNamespace)
-        $null = $specializeSettings.SetAttribute('pass', 'specialize')
-        $firstSettingsNode = $unattendRoot.SelectSingleNode('un:settings', $namespaceManager)
-        if ($null -ne $firstSettingsNode) {
-            $null = $unattendRoot.InsertBefore($specializeSettings, $firstSettingsNode)
-        }
-        else {
-            $null = $unattendRoot.AppendChild($specializeSettings)
-        }
-    }
-
-    $deploymentComponents = @($specializeSettings.SelectNodes("un:component[@name='Microsoft-Windows-Deployment']", $namespaceManager) |
-        Where-Object { $_.GetAttribute('processorArchitecture') -ieq $ProcessorArchitecture })
-    if ($deploymentComponents.Count -gt 1) {
-        throw "Unattend XML at $UnattendPath contains multiple Microsoft-Windows-Deployment components for $ProcessorArchitecture."
-    }
-    if ($deploymentComponents.Count -eq 0) {
-        $deploymentComponent = $unattendXml.CreateElement('component', $unattendNamespace)
-        $null = $deploymentComponent.SetAttribute('name', 'Microsoft-Windows-Deployment')
-        $null = $deploymentComponent.SetAttribute('processorArchitecture', $ProcessorArchitecture)
-        $null = $deploymentComponent.SetAttribute('publicKeyToken', '31bf3856ad364e35')
-        $null = $deploymentComponent.SetAttribute('language', 'neutral')
-        $null = $deploymentComponent.SetAttribute('versionScope', 'nonSxS')
-        $null = $specializeSettings.AppendChild($deploymentComponent)
-    }
-    else {
-        $deploymentComponent = $deploymentComponents[0]
-    }
-
-    $runSynchronous = $deploymentComponent.SelectSingleNode('un:RunSynchronous', $namespaceManager)
-    if ($null -eq $runSynchronous) {
-        $runSynchronous = $unattendXml.CreateElement('RunSynchronous', $unattendNamespace)
-        $null = $deploymentComponent.AppendChild($runSynchronous)
-    }
-
-    $existingCommands = @($runSynchronous.SelectNodes('un:RunSynchronousCommand', $namespaceManager))
-    $orderedExistingCommands = [System.Collections.Generic.List[pscustomobject]]::new()
-    $commandIndex = 0
-    foreach ($existingCommand in $existingCommands) {
-        $pathNode = $existingCommand.SelectSingleNode('un:Path', $namespaceManager)
-        if ($null -ne $pathNode -and $pathNode.InnerText -match '(?i)\\FFUDL\\Apply\.ps1') {
-            $null = $runSynchronous.RemoveChild($existingCommand)
-            continue
-        }
-
-        $orderValue = [int]::MaxValue
-        $orderNode = $existingCommand.SelectSingleNode('un:Order', $namespaceManager)
-        if ($null -ne $orderNode) {
-            $parsedOrder = 0
-            if ([int]::TryParse($orderNode.InnerText, [ref]$parsedOrder)) {
-                $orderValue = $parsedOrder
-            }
-        }
-        $orderedExistingCommands.Add([pscustomobject]@{ Node = $existingCommand; Order = $orderValue; Index = $commandIndex })
-        $commandIndex++
-    }
-
-    $nextOrder = 2
-    foreach ($existingCommandInfo in @($orderedExistingCommands | Sort-Object -Property Order, Index)) {
-        $orderNode = $existingCommandInfo.Node.SelectSingleNode('un:Order', $namespaceManager)
-        if ($null -eq $orderNode) {
-            $orderNode = $unattendXml.CreateElement('Order', $unattendNamespace)
-            $null = $existingCommandInfo.Node.PrependChild($orderNode)
-        }
-        $orderNode.InnerText = [string]$nextOrder
-        $nextOrder++
-    }
-
-    $newCommand = $unattendXml.CreateElement('RunSynchronousCommand', $unattendNamespace)
-    $actionAttribute = $unattendXml.CreateAttribute('wcm', 'action', $wcmNamespace)
-    $actionAttribute.Value = 'add'
-    $null = $newCommand.Attributes.Append($actionAttribute)
-    $orderElement = $unattendXml.CreateElement('Order', $unattendNamespace)
-    $orderElement.InnerText = '1'
-    $null = $newCommand.AppendChild($orderElement)
-    $descriptionElement = $unattendXml.CreateElement('Description', $unattendNamespace)
-    $descriptionElement.InnerText = 'Apply FFU data partition drive letters'
-    $null = $newCommand.AppendChild($descriptionElement)
-    $pathElement = $unattendXml.CreateElement('Path', $unattendNamespace)
-    $specializeCommand = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Windows\Setup\Scripts\FFUDL\Apply.ps1" -ManifestPath "C:\Windows\Setup\Scripts\FFUDL\Manifest.json" -Phase Specialize'
-    if ($specializeCommand.Length -gt 259) {
-        throw "Data partition drive-letter specialize command exceeds the 259-character unattend Path limit. Length: $($specializeCommand.Length)."
-    }
-    $pathElement.InnerText = $specializeCommand
-    $null = $newCommand.AppendChild($pathElement)
-    $willRebootElement = $unattendXml.CreateElement('WillReboot', $unattendNamespace)
-    $willRebootElement.InnerText = 'OnRequest'
-    $null = $newCommand.AppendChild($willRebootElement)
-    if ($null -ne $runSynchronous.FirstChild) {
-        $null = $runSynchronous.InsertBefore($newCommand, $runSynchronous.FirstChild)
-    }
-    else {
-        $null = $runSynchronous.AppendChild($newCommand)
-    }
-
-    $unattendXml.Save($UnattendPath)
-    WriteLog "Merged data partition drive-letter specialize command into $UnattendPath."
-}
-
-function Test-FFUDataPartitionDriveLetterCommandInAppliedUnattend {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$UnattendPath,
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('amd64', 'arm64')]
-        [string]$ProcessorArchitecture
-    )
-
-    if (-not (Test-Path -LiteralPath $UnattendPath -PathType Leaf)) {
-        throw "Data partition drive-letter deployment unattend was not found at $UnattendPath."
-    }
-
-    $unattendNamespace = 'urn:schemas-microsoft-com:unattend'
-    $wcmNamespace = 'http://schemas.microsoft.com/WMIConfig/2002/State'
-    $unattendXml = New-Object System.Xml.XmlDocument
-    $unattendXml.Load($UnattendPath)
-    if ($null -eq $unattendXml.DocumentElement -or $unattendXml.DocumentElement.NamespaceURI -ne $unattendNamespace) {
-        throw "Unattend XML at $UnattendPath does not use the supported unattend root namespace."
-    }
-
-    $namespaceManager = New-Object System.Xml.XmlNamespaceManager($unattendXml.NameTable)
-    $namespaceManager.AddNamespace('un', $unattendNamespace)
-    $deploymentComponents = @($unattendXml.SelectNodes("//un:settings[@pass='specialize']/un:component[@name='Microsoft-Windows-Deployment']", $namespaceManager) |
-        Where-Object { $_.GetAttribute('processorArchitecture') -ieq $ProcessorArchitecture })
-    if ($deploymentComponents.Count -ne 1) {
-        throw "Expected exactly one specialize Microsoft-Windows-Deployment component for $ProcessorArchitecture in $UnattendPath."
-    }
-
-    $commands = @($deploymentComponents[0].SelectNodes('un:RunSynchronous/un:RunSynchronousCommand', $namespaceManager))
-    $driveLetterCommands = @($commands | Where-Object {
-            $pathNode = $_.SelectSingleNode('un:Path', $namespaceManager)
-            $null -ne $pathNode -and $pathNode.InnerText -match '(?i)\\FFUDL\\Apply\.ps1'
-        })
-    if ($driveLetterCommands.Count -ne 1) {
-        throw "Expected exactly one data partition drive-letter specialize command in $UnattendPath."
-    }
-
-    $driveLetterCommand = $driveLetterCommands[0]
-    $pathNode = $driveLetterCommand.SelectSingleNode('un:Path', $namespaceManager)
-    $orderNode = $driveLetterCommand.SelectSingleNode('un:Order', $namespaceManager)
-    $willRebootNode = $driveLetterCommand.SelectSingleNode('un:WillReboot', $namespaceManager)
-    if ($null -eq $pathNode -or $pathNode.InnerText -notmatch '(?i)-WindowStyle\s+Hidden\s+-File(?:\s|$)') {
-        throw "Data partition drive-letter specialize command does not use a hidden PowerShell window in $UnattendPath."
-    }
-    if ($null -eq $orderNode -or $orderNode.InnerText -ne '1') {
-        throw "Data partition drive-letter specialize command is not first in $UnattendPath."
-    }
-    if ($null -eq $willRebootNode -or $willRebootNode.InnerText -ne 'OnRequest') {
-        throw "Data partition drive-letter specialize command does not use WillReboot=OnRequest in $UnattendPath."
-    }
-    if ($driveLetterCommand.GetAttribute('action', $wcmNamespace) -ne 'add') {
-        throw "Data partition drive-letter specialize command does not use wcm:action=add in $UnattendPath."
-    }
-    foreach ($otherCommand in @($commands | Where-Object { $_ -ne $driveLetterCommand })) {
-        $otherOrderNode = $otherCommand.SelectSingleNode('un:Order', $namespaceManager)
-        $otherOrder = 0
-        if ($null -eq $otherOrderNode -or -not [int]::TryParse($otherOrderNode.InnerText, [ref]$otherOrder) -or $otherOrder -le 1) {
-            throw "Another specialize command conflicts with first order in $UnattendPath."
-        }
-    }
-
-    WriteLog "Verified data partition drive-letter specialize command in $UnattendPath."
-}
-
-function Test-LegacyPromptComputerName($computername) {
-    if ([string]::IsNullOrWhiteSpace($computername)) {
-        return $false
-    }
-
-    $normalizedName = $computername.Trim().ToLowerInvariant()
-    return $normalizedName -in @('mycomputer', 'default')
-}
-
-function Get-NormalizedComputerName($computername) {
-    if ([string]::IsNullOrWhiteSpace($computername)) {
-        throw 'Computer name cannot be empty.'
-    }
-
-    $normalizedName = ($computername -replace "\s", '').Trim()
-    if ([string]::IsNullOrWhiteSpace($normalizedName)) {
-        throw 'Computer name cannot be empty after removing spaces.'
-    }
-
-    if ($normalizedName.Length -gt 15) {
-        $normalizedName = $normalizedName.Substring(0, 15)
-    }
-
-    return $normalizedName
-}
-
-function Resolve-ComputerNameTemplate($computerNameTemplate, $serialNumber) {
-    if ([string]::IsNullOrWhiteSpace($computerNameTemplate)) {
-        throw 'Computer name template cannot be empty.'
-    }
-
-    $resolvedName = $computerNameTemplate -replace '(?i)%serial%', $serialNumber
-    if ($resolvedName -match '%') {
-        throw 'Unsupported device name variable found. Only %serial% is supported.'
-    }
-
-    return Get-NormalizedComputerName($resolvedName)
-}
-
-function Set-ConfiguredComputerName($computername) {
-    $normalizedName = Get-NormalizedComputerName($computername)
-    $normalizedName = Set-Computername($normalizedName)
-    Writelog "Computer name will be set to $normalizedName"
-    Write-Host "Computer name will be set to $normalizedName"
-    return $normalizedName
+    WriteLog "Copying dism log to $LogRoot"
+    Invoke-Process xcopy "X:\Windows\logs\dism\dism.log $LogRoot /Y" 
+    WriteLog "Copying dism log to $LogRoot succeeded"
+    Read-Host "Press Enter to exit"
+    Exit
 }
 
 function Invoke-Process {
@@ -509,6 +173,81 @@ function Write-SectionHeader($Title) {
     Write-Host ('-' * $width) -ForegroundColor Yellow
     Write-Host $centeredTitle -ForegroundColor Yellow
     Write-Host ('-' * $width) -ForegroundColor Yellow
+}
+
+function Get-HardDrive() {
+    $systemInfo = Get-CimInstance -Class 'Win32_ComputerSystem'
+    $manufacturer = $systemInfo.Manufacturer
+    $model = $systemInfo.Model
+    WriteLog 'Getting Hard Drive info'
+    if ($manufacturer -eq 'Microsoft Corporation' -and $model -eq 'Virtual Machine') {
+        WriteLog 'Running in a Hyper-V VM. Getting virtual disk on Index 0 and SCSILogicalUnit 0'
+        $diskDriveCandidates = @(Get-CimInstance -Class 'Win32_DiskDrive' | Where-Object { $_.MediaType -eq 'Fixed hard disk media' `
+                    -and $_.Model -eq 'Microsoft Virtual Disk' `
+                    -and $_.Index -eq 0 `
+                    -and $_.SCSILogicalUnit -eq 0
+            })
+    }
+    else {
+        WriteLog 'Not running in a VM. Getting physical disk drive'
+        $diskDriveCandidates = @(Get-CimInstance -Class 'Win32_DiskDrive' | Where-Object { $_.MediaType -eq 'Fixed hard disk media' -and $_.Model -ne 'Microsoft Virtual Disk' })
+    }
+
+    # Return the array of candidates for selection in main script
+    return $diskDriveCandidates
+}
+
+function Read-MenuSelection {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Prompt,
+
+        [Parameter(Mandatory = $true)]
+        [string]$InvalidInputMessage,
+
+        [Parameter()]
+        [int[]]$ValidSelections,
+
+        [Parameter()]
+        [int]$Minimum = [int]::MinValue,
+
+        [Parameter()]
+        [int]$Maximum = [int]::MaxValue,
+
+        [Parameter()]
+        [switch]$AllowSkip
+    )
+
+    do {
+        $userInput = Read-Host $Prompt
+        if ([string]::IsNullOrWhiteSpace($userInput)) {
+            Write-Host $InvalidInputMessage
+            continue
+        }
+
+        $selection = 0
+        if (-not [int]::TryParse($userInput, [ref]$selection)) {
+            Write-Host $InvalidInputMessage
+            continue
+        }
+
+        if ($AllowSkip -and $selection -eq 0) {
+            return 0
+        }
+
+        if ($PSBoundParameters.ContainsKey('ValidSelections')) {
+            if ($ValidSelections -notcontains $selection) {
+                Write-Host $InvalidInputMessage
+                continue
+            }
+        }
+        elseif ($selection -lt $Minimum -or $selection -gt $Maximum) {
+            Write-Host $InvalidInputMessage
+            continue
+        }
+
+        return $selection
+    } until ($false)
 }
 
 function Get-NormalizedManufacturer {
@@ -843,230 +582,6 @@ function Write-SystemInformation {
     Write-Host
 }
 
-function Find-DriverMappingRule {
-    param(
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$SystemInformation,
-        [Parameter(Mandatory = $true)]
-        [object[]]$DriverMappings
-    )
-
-    $normalizedManufacturer = if ($SystemInformation.PSObject.Properties['ManufacturerNormalized']) {
-        $SystemInformation.ManufacturerNormalized
-    }
-    else {
-        Get-NormalizedManufacturer -Manufacturer $SystemInformation.Manufacturer
-    }
-    if ([string]::IsNullOrWhiteSpace($normalizedManufacturer)) {
-        WriteLog 'DriverMapping: Unable to determine manufacturer for automatic matching.'
-        return $null
-    }
-
-    $driverMappingsArray = @()
-    foreach ($entry in @($DriverMappings)) {
-        if ($null -ne $entry) {
-            $driverMappingsArray += $entry
-        }
-    }
-    if ($driverMappingsArray.Count -eq 0) {
-        WriteLog 'DriverMapping: Mapping file contained no entries.'
-        return $null
-    }
-
-    $rulesForMake = @($driverMappingsArray | Where-Object {
-            $entryManufacturer = Get-NormalizedManufacturer -Manufacturer $_.Manufacturer
-            $entryManufacturer -eq $normalizedManufacturer
-        })
-    if ($rulesForMake.Count -eq 0) {
-        WriteLog "DriverMapping: No entries found for manufacturer '$normalizedManufacturer'."
-        return $null
-    }
-
-    $systemSkuNormalized = if ($SystemInformation.PSObject.Properties['SystemSkuNormalized']) { $SystemInformation.SystemSkuNormalized } else { $null }
-    $fallbackSkuNormalized = if ($SystemInformation.PSObject.Properties['FallbackSkuNormalized']) { $SystemInformation.FallbackSkuNormalized } else { $null }
-    $machineTypeNormalized = if ($SystemInformation.PSObject.Properties['MachineTypeNormalized']) { $SystemInformation.MachineTypeNormalized } else { $null }
-    $normalizedModel = if ($SystemInformation.PSObject.Properties['ModelNormalized']) { $SystemInformation.ModelNormalized } else { $null }
-    if ([string]::IsNullOrWhiteSpace($normalizedModel)) {
-        $normalizedModel = ConvertTo-ComparableModelName -Text $SystemInformation.Model
-    }
-
-    switch ($normalizedManufacturer) {
-        'Dell' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Dell SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            if (-not [string]::IsNullOrWhiteSpace($fallbackSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $fallbackSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Dell fallback SKU '$fallbackSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: Dell identifiers did not match any entries.'
-            return $null
-        }
-        'HP' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: HP SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: HP SystemId not detected or not present in mapping.'
-            return $null
-        }
-        'Lenovo' {
-            if (-not [string]::IsNullOrWhiteSpace($machineTypeNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['MachineType'] -and $_.MachineType.Trim().ToUpperInvariant() -eq $machineTypeNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Lenovo MachineType '$machineTypeNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: Lenovo MachineType not detected or not present in mapping.'
-            return $null
-        }
-        'Microsoft' {
-            # Prefer System SKU matching for Microsoft/Surface when available.
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                foreach ($rule in $rulesForMake) {
-                    if ($rule.PSObject.Properties['SystemSku'] -and $null -ne $rule.SystemSku) {
-                        foreach ($sku in @($rule.SystemSku)) {
-                            if (-not [string]::IsNullOrWhiteSpace($sku) -and $sku.Trim().ToUpperInvariant() -eq $systemSkuNormalized) {
-                                WriteLog "DriverMapping: Microsoft SystemSku '$systemSkuNormalized' matched '$($rule.Model)'."
-                                return $rule
-                            }
-                        }
-                    }
-                }
-            }
-
-            # Fallback to model string comparison (legacy behavior).
-            foreach ($rule in $rulesForMake) {
-                $ruleModelNorm = ConvertTo-ComparableModelName -Text $rule.Model
-                if (-not [string]::IsNullOrWhiteSpace($ruleModelNorm) -and $ruleModelNorm -eq $normalizedModel) {
-                    WriteLog "DriverMapping: Microsoft model '$normalizedModel' matched '$($rule.Model)'."
-                    return $rule
-                }
-            }
-            WriteLog 'DriverMapping: Microsoft model not present in mapping.'
-            return $null
-        }
-        'Panasonic Corporation' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Panasonic SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: Panasonic SystemId not detected or not present in mapping.'
-            return $null
-        }
-        'Viglen' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Viglen SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: Viglen SystemId not detected or not present in mapping.'
-            return $null
-        }
-        'AZW' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: AZW SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: AZW SystemId not detected or not present in mapping.'
-            return $null
-        }
-        'Fujitsu' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Fujitsu SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: Fujitsu SystemId not detected or not present in mapping.'
-            return $null
-        }
-        'Getac' {
-            if (-not [string]::IsNullOrWhiteSpace($systemSkuNormalized)) {
-                $match = $rulesForMake | Where-Object { $_.PSObject.Properties['SystemId'] -and $_.SystemId.Trim().ToUpperInvariant() -eq $systemSkuNormalized } | Select-Object -First 1
-                if ($match) {
-                    WriteLog "DriverMapping: Getac SystemId '$systemSkuNormalized' matched '$($match.Model)'."
-                    return $match
-                }
-            }
-            WriteLog 'DriverMapping: Getac SystemId not detected or not present in mapping.'
-            return $null
-        }
-        'Intel' {
-            foreach ($rule in $rulesForMake) {
-                if (-not $rule.PSObject.Properties['Model']) { continue }
-                $ruleModelNorm = ConvertTo-ComparableModelName -Text $rule.Model
-                if (-not [string]::IsNullOrWhiteSpace($ruleModelNorm) -and $ruleModelNorm -eq $normalizedModel) {
-                    WriteLog "DriverMapping: Intel model '$normalizedModel' matched '$($rule.Model)'."
-                    return $rule
-                }
-            }
-            WriteLog 'DriverMapping: Intel model not detected or not present in mapping.'
-            return $null
-        }
-        'ByteSpeed' {
-            foreach ($rule in $rulesForMake) {
-                if (-not $rule.PSObject.Properties['Model']) { continue }
-                $ruleModelNorm = ConvertTo-ComparableModelName -Text $rule.Model
-                if (-not [string]::IsNullOrWhiteSpace($ruleModelNorm) -and $ruleModelNorm -eq $normalizedModel) {
-                    WriteLog "DriverMapping: ByteSpeed model '$normalizedModel' matched '$($rule.Model)'."
-                    return $rule
-                }
-            }
-            WriteLog 'DriverMapping: ByteSpeed model not detected or not present in mapping.'
-            return $null
-        }
-        default {
-            # Generic fallback for manufacturers without explicit handling
-            foreach ($rule in $rulesForMake) {
-                if (-not $rule.PSObject.Properties['Model']) { continue }
-                $ruleModelNorm = ConvertTo-ComparableModelName -Text $rule.Model
-                if (-not [string]::IsNullOrWhiteSpace($ruleModelNorm) -and $ruleModelNorm -eq $normalizedModel) {
-                    WriteLog "DriverMapping: Manufacturer '$normalizedManufacturer' model '$normalizedModel' matched '$($rule.Model)'."
-                    return $rule
-                }
-            }
-            WriteLog "DriverMapping: No generic match found for manufacturer '$normalizedManufacturer' using model '$normalizedModel'."
-            return $null
-        }
-    }
-}
-
-function Stop-Script {
-    param(
-        [string]$Message
-    )
-    Write-Host "`n"
-    if (-not [string]::IsNullOrWhiteSpace($Message)) {
-        Write-Error -Message $Message
-    }
-    WriteLog "Copying dism log to $USBDrive"
-    Invoke-Process xcopy "X:\Windows\logs\dism\dism.log $USBDrive /Y" 
-    WriteLog "Copying dism log to $USBDrive succeeded"
-    Read-Host "Press Enter to exit"
-    Exit
-}
-
 function ConvertTo-ComparableModelName {
     [CmdletBinding()]
     param(
@@ -1091,101 +606,176 @@ function ConvertTo-ComparableModelName {
     }
     return $normalized
 }
-    
-function Test-DriverFolderHasInstallableContent {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-    
-    if (-not (Test-Path -Path $Path -PathType Container)) {
-        return $false
+
+function Get-UnattendComputerNameValue {
+    if ($null -eq $UnattendFile) {
+        return $null
     }
-    
-    try {
-        $nonWimFile = Get-ChildItem -Path $Path -File -Recurse -ErrorAction Stop | Where-Object {
-            $extension = $_.Extension
-            if ([string]::IsNullOrWhiteSpace($extension)) {
-                return $true
-            }
-            return $extension.ToLowerInvariant() -ne '.wim'
-        } | Select-Object -First 1
-    
-        if ($nonWimFile) {
-            return $true
-        }
-    
-        return $false
-    }
-    catch {
-        WriteLog "Failed to inspect driver folder '$Path': $($_.Exception.Message)"
-        return $false
-    }
-}
-    
-function Get-AvailableDriveLetter {
-    $usedLetters = (Get-PSDrive -PSProvider FileSystem).Name | ForEach-Object { $_.ToUpperInvariant() }
-    for ($ascii = [int][char]'Z'; $ascii -ge [int][char]'A'; $ascii--) {
-        $candidate = [char]$ascii
-        if ($usedLetters -notcontains $candidate) {
-            return $candidate
+
+    [xml]$xml = Get-Content $UnattendFile
+    foreach ($component in $xml.unattend.settings.component) {
+        if ($component.ComputerName) {
+            return [string]$component.ComputerName
         }
     }
+
     return $null
 }
-    
-function New-DriverSubstMapping {
-    [CmdletBinding()]
+
+function Test-LegacyPromptComputerName($computername) {
+    if ([string]::IsNullOrWhiteSpace($computername)) {
+        return $false
+    }
+
+    $normalizedName = $computername.Trim().ToLowerInvariant()
+    return $normalizedName -in @('mycomputer', 'default')
+}
+
+function Get-NormalizedComputerName($computername) {
+    if ([string]::IsNullOrWhiteSpace($computername)) {
+        throw 'Computer name cannot be empty.'
+    }
+
+    $normalizedName = ($computername -replace "\s", '').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalizedName)) {
+        throw 'Computer name cannot be empty after removing spaces.'
+    }
+
+    if ($normalizedName.Length -gt 15) {
+        $normalizedName = $normalizedName.Substring(0, 15)
+    }
+
+    return $normalizedName
+}
+
+function Set-ConfiguredComputerName($computername) {
+    $normalizedName = Get-NormalizedComputerName($computername)
+    $normalizedName = Set-Computername($normalizedName)
+    Writelog "Computer name will be set to $normalizedName"
+    Write-Host "Computer name will be set to $normalizedName"
+    return $normalizedName
+}
+
+function Set-Computername($computername) {
+    [xml]$xml = Get-Content $UnattendFile
+    $components = $xml.unattend.settings.component
+    $found = $false
+    foreach ($component in $components) {
+        if ($component.ComputerName) {
+            $component.ComputerName = $computername
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) {
+        WriteLog 'ComputerName element not found in unattend.xml.'
+        throw 'ComputerName element not found in unattend.xml.'
+    }
+    $xml.Save($UnattendFile)
+    return $computername
+}
+
+function Resolve-ComputerNameTemplate($computerNameTemplate, $serialNumber) {
+    if ([string]::IsNullOrWhiteSpace($computerNameTemplate)) {
+        throw 'Computer name template cannot be empty.'
+    }
+
+    $resolvedName = $computerNameTemplate -replace '(?i)%serial%', $serialNumber
+    if ($resolvedName -match '%') {
+        throw 'Unsupported device name variable found. Only %serial% is supported.'
+    }
+
+    return Get-NormalizedComputerName($resolvedName)
+}
+
+function Get-WindowsPartitionFromAppliedDisk {
+    param(
+        [Parameter(Mandatory)]
+        [int]$DiskNumber
+    )
+
+    $basicDataPartitions = @(Get-Partition -DiskNumber $DiskNumber | Where-Object { $_.GptType -eq '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' })
+    foreach ($partition in $basicDataPartitions) {
+        if ([string]::IsNullOrWhiteSpace($partition.DriveLetter)) { continue }
+        $volume = Get-Volume -DriveLetter $partition.DriveLetter -ErrorAction SilentlyContinue
+        if ($null -ne $volume -and $volume.FileSystemLabel -eq 'Windows') {
+            return $partition
+        }
+    }
+
+    return $basicDataPartitions | Select-Object -First 1
+}
+
+function Get-FFUDataPartitionDriveLetterDeploymentContext {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$SourcePath
+        [string]$WindowsPartitionRoot
     )
-    
-    $resolvedPath = (Resolve-Path -Path $SourcePath -ErrorAction Stop).Path
-    $driveLetter = Get-AvailableDriveLetter
-    if ($null -eq $driveLetter) {
-        throw 'No drive letters are available for SUBST mapping.'
+
+    $runtimeDirectory = Join-Path -Path $WindowsPartitionRoot -ChildPath 'Windows\Setup\Scripts\FFUDL'
+    $runtimeScriptPath = Join-Path -Path $runtimeDirectory -ChildPath 'Apply.ps1'
+    $manifestPath = Join-Path -Path $runtimeDirectory -ChildPath 'Manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        if (Test-Path -LiteralPath $runtimeDirectory -PathType Container) {
+            throw "Data partition drive-letter runtime directory exists without a manifest at $manifestPath."
+        }
+        return $null
     }
-    $driveName = "$driveLetter`:"
-    $mappedPath = "$driveLetter`:\"
-    WriteLog "Mapping driver folder '$resolvedPath' to $driveName with SUBST."
-    $escapedPath = $resolvedPath -replace '"', '""'
-    $arguments = "/c subst $driveName `"$escapedPath`""
-    Invoke-Process -FilePath cmd.exe -ArgumentList $arguments
-    return [PSCustomObject]@{
-        DriveLetter = $driveLetter
-        DriveName   = $driveName
-        DrivePath   = $mappedPath
+
+    if (-not (Test-Path -LiteralPath $runtimeScriptPath -PathType Leaf)) {
+        throw "Data partition drive-letter manifest exists without its runtime script at $runtimeScriptPath."
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([int]$manifest.SchemaVersion -ne 1) {
+        throw "Unsupported data partition drive-letter manifest schema version '$($manifest.SchemaVersion)'."
+    }
+    if (@($manifest.Partitions).Count -eq 0) {
+        throw 'Data partition drive-letter manifest does not contain any partitions.'
+    }
+
+    $processorArchitecture = ([string]$manifest.ProcessorArchitecture).Trim().ToLowerInvariant()
+    if ($processorArchitecture -notin @('amd64', 'arm64')) {
+        throw "Unsupported data partition drive-letter processor architecture '$processorArchitecture'."
+    }
+
+    WriteLog "Found data partition drive-letter assignment manifest with $(@($manifest.Partitions).Count) partition(s)."
+    return [pscustomobject]@{
+        RuntimeDirectory      = $runtimeDirectory
+        RuntimeScriptPath     = $runtimeScriptPath
+        ManifestPath          = $manifestPath
+        ProcessorArchitecture = $processorArchitecture
     }
 }
-    
-function Remove-DriverSubstMapping {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$DriveLetter
-    )
-    
-    $driveName = "$DriveLetter`:"
-    WriteLog "Removing SUBST drive $driveName"
-    try {
-        $arguments = "/c subst $driveName /d"
-        Invoke-Process -FilePath cmd.exe -ArgumentList $arguments
-    }
-    catch {
-        WriteLog "Failed to remove SUBST drive $($driveName): $_"
-    }
+
+# Ensure network operability
+Start-Sleep -Seconds 5
+Write-Host "Waiting for SMB connection..."
+while (!(Test-Connection -ComputerName $FFUServerHost -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
+    Write-Host "Attempt failed. Retrying in 15 seconds..."
+    Start-Sleep -Seconds 15
 }
-        
-#Get USB Drive and create log file
+Write-Host "Network connection established"
+
+#Get Drive Roots and create log file
+$DeployRoot = Get-FFUShare
+$DriverRoot = Get-DriverShare
+
+if (-not $DeployRoot -or -not $DriverRoot) {
+    Write-Host "Required network share could not be mapped. Aborting."
+    exit 1
+}
+
+$serialNumber = (Get-CimInstance -ClassName Win32_Bios).SerialNumber.Trim()
 $LogFileName = 'ScriptLog.txt'
-$USBDrive = Get-USBDrive
-New-item -Path $USBDrive -Name $LogFileName -ItemType "file" -Force | Out-Null
-$LogFile = $USBDrive + $LogFilename
+$LogRoot = "$($DeployRoot)\Logs\$($serialNumber)"
+New-item -Path "$($LogRoot)" -Name $LogFileName -ItemType "file" -Force | Out-Null
+$LogFile = "$($LogRoot)\$($LogFileName)"
 $version = '2609.1'
 WriteLog 'Begin Logging'
 WriteLog "Script version: $version"
+WriteLog "Deploy Root is $($DeployRoot)"
+WriteLog "Driver Root is $($DriverRoot)"
 
 # Display banner and version
 $banner = @"
@@ -1200,11 +790,15 @@ $banner = @"
 "@
 Write-Host $banner -ForegroundColor Cyan
 Write-Host "Version $version" -ForegroundColor Cyan
+Write-Host "Deploy Root is $($DeployRoot)\"
+Write-Host "Driver Root is $($DriverRoot)\"
 
 #Find PhysicalDrive
 Write-SectionHeader -Title 'Target Disk Selection'
 $diskDriveCandidates = @(Get-HardDrive)
 $diskCount = $diskDriveCandidates.Count
+
+# Raise error if no disks found
 if ($diskCount -eq 0) {
     $errorMessage = 'No hard drive found. You may need to add storage drivers to the WinPE image.'
     WriteLog ($errorMessage + ' Exiting.')
@@ -1269,7 +863,7 @@ Write-SystemInformation -SystemInformation $sysInfoObject
 
 #Find FFU Files
 Write-SectionHeader 'FFU File Selection'
-[array]$FFUFiles = @(Get-ChildItem -Path $USBDrive*.ffu)
+[array]$FFUFiles = @(Get-ChildItem -Path "$($DeployRoot)\*.ffu")
 $FFUCount = $FFUFiles.Count
 
 #If multiple FFUs found, ask which to install
@@ -1302,144 +896,82 @@ else {
     Stop-Script -Message $errorMessage
 }
 
-#FindAP
-$APFolder = $USBDrive + "Autopilot\"
-If (Test-Path -Path $APFolder) {
-    [array]$APFiles = @(Get-ChildItem -Path $APFolder*.json)
-    $APFilesCount = $APFiles.Count
-    if ($APFilesCount -ge 1) {
-        $autopilot = $true
-    }
-}
-
-
-#FindPPKG
-$PPKGFolder = $USBDrive + "PPKG\"
-if (Test-Path -Path $PPKGFolder) {
-    [array]$PPKGFiles = @(Get-ChildItem -Path $PPKGFolder*.ppkg)
-    $PPKGFilesCount = $PPKGFiles.Count
-    if ($PPKGFilesCount -ge 1) {
-        $PPKG = $true
-    }
-}
-
 #FindUnattend
-$UnattendFolder = $USBDrive + "unattend\"
-$UnattendSourceFilePath = $UnattendFolder + "unattend.xml"
-$UnattendWorkingFilePath = Join-Path -Path $env:TEMP -ChildPath 'unattend.xml'
-$UnattendPrefixPath = $UnattendFolder + "prefixes.txt"
-$UnattendComputerNamePath = $UnattendFolder + "SerialComputerNames.csv"
-If (Test-Path -Path $UnattendSourceFilePath) {
-    $UnattendSourceFile = Get-ChildItem -Path $UnattendSourceFilePath
-    If ($UnattendSourceFile) {
-        try {
-            WriteLog "Copying source unattend file $($UnattendSourceFile.FullName) to temporary working file $UnattendWorkingFilePath"
-            Copy-Item -Path $UnattendSourceFile.FullName -Destination $UnattendWorkingFilePath -Force -ErrorAction Stop
-            $UnattendFile = Get-ChildItem -Path $UnattendWorkingFilePath -ErrorAction Stop
-            WriteLog "Using temporary unattend working file $($UnattendFile.FullName)"
-            $Unattend = $true
-        }
-        catch {
+$UnattendFolder = "$($DeployRoot)\unattend"
+$UnattendSourceFile = Get-ChildItem -Path "$($UnattendFolder)\unattend.xml"
+$UnattendWorkingFilePath = "$($env:TEMP)\unattend.xml"
+
+If (Test-Path -Path $UnattendSourceFile) {
+	# Write-Host $UnattendSourceFile
+	If ($UnattendSourceFile) {
+		try {
+			WriteLog "Copying source unattend file $($UnattendSourceFile.FullName) to temporary working file $UnattendWorkingFilePath"
+			Copy-Item -Path $UnattendSourceFile.FullName -Destination $UnattendWorkingFilePath -Force -ErrorAction Stop
+			$UnattendFile = Get-ChildItem -Path $UnattendWorkingFilePath -ErrorAction Stop
+			WriteLog "Using temporary unattend working file $($UnattendFile.FullName)"
+			$Unattend = $true
+		}
+		catch {
             WriteLog "Copying source unattend file to temporary working file failed with error: $_"
             Stop-Script -Message "Copying source unattend file to temporary working file failed with error: $_"
         }
-    }
-}
-If (Test-Path -Path $UnattendPrefixPath) {
-    $UnattendPrefixFile = Get-ChildItem -Path $UnattendPrefixPath
-    If ($UnattendPrefixFile) {
-        $UnattendPrefix = $true
-    }
-}
-If (Test-Path -Path $UnattendComputerNamePath) {
-    $UnattendComputerNameFile = Get-ChildItem -Path $UnattendComputerNamePath
-    If ($UnattendComputerNameFile) {
-        $UnattendComputerName = $true
-    }
+	}
 }
 
 $UnattendConfiguredComputerName = $null
-$RequiresLegacyDeviceNamePrompt = $false
 $RequiresTemplateDeviceName = $false
 if ($Unattend) {
-    $UnattendConfiguredComputerName = Get-UnattendComputerNameValue
-    $RequiresLegacyDeviceNamePrompt = Test-LegacyPromptComputerName($UnattendConfiguredComputerName)
-    if (-not [string]::IsNullOrWhiteSpace($UnattendConfiguredComputerName) -and $UnattendConfiguredComputerName -match '(?i)%serial%') {
+	$UnattendConfiguredComputerName = Get-UnattendComputerNameValue
+	if (-not [string]::IsNullOrWhiteSpace($UnattendConfiguredComputerName) -and $UnattendConfiguredComputerName -match '(?i)%serial%') {
         $RequiresTemplateDeviceName = $true
     }
+	elseif (-not [string]::IsNullOrWhiteSpace($UnattendConfiguredComputerName) -and $UnattendConfiguredComputerName -eq '*') {
+        $RequiresDeviceNameLookup = $true
+    }
+	$RequiresLegacyDeviceNamePrompt = Test-LegacyPromptComputerName($UnattendConfiguredComputerName)
 }
 
-#Ask for device name if naming is explicitly required
-If ($UnattendPrefix -or $UnattendComputerName -or $RequiresTemplateDeviceName -or $RequiresLegacyDeviceNamePrompt) {
-    Write-SectionHeader 'Device Name Selection'
-    if ($Unattend -and $UnattendPrefix) {
-        Writelog 'Unattend file found with prefixes.txt. Getting prefixes.'
-        $UnattendPrefixes = @(Get-content $UnattendPrefixFile)
-        $UnattendPrefixCount = $UnattendPrefixes.Count
-        $skipPrefixSelection = $false
-        $PrefixToUse = $null
-        If ($UnattendPrefixCount -gt 1) {
-            WriteLog "Found $UnattendPrefixCount Prefixes"
-            $array = @()
-            for ($i = 0; $i -le $UnattendPrefixCount - 1; $i++) {
-                $Properties = [ordered]@{Number = $i + 1 ; DeviceNamePrefix = $UnattendPrefixes[$i] }
-                $array += New-Object PSObject -Property $Properties
-            }
-            $array | Format-Table -AutoSize -Property Number, DeviceNamePrefix
-            $prefixSelection = Read-MenuSelection -Prompt 'Enter the prefix number to use for the device name (0 to skip)' -InvalidInputMessage 'Input was not in correct format. Please enter 0 to skip or a valid prefix number.' -Minimum 1 -Maximum $UnattendPrefixCount -AllowSkip
-            if ($prefixSelection -eq 0) {
-                $skipPrefixSelection = $true
-                WriteLog 'User chose to skip device name prefix selection. Existing unattend computer name will remain unchanged.'
-                Write-Host "`nDevice name prefix selection was skipped. The existing unattend computer name will remain unchanged."
-            }
-            else {
-                $PrefixSelected = $prefixSelection - 1
-                $PrefixToUse = $array[$PrefixSelected].DeviceNamePrefix
-                WriteLog "$PrefixToUse was selected"
-                Write-Host "`n$PrefixToUse was selected as device name prefix"
-            }
-        }
-        elseif ($UnattendPrefixCount -eq 1) {
-            WriteLog "Found $UnattendPrefixCount Prefix"
-            Write-Host "Found $UnattendPrefixCount Prefix"
-            $PrefixToUse = $UnattendPrefixes[0]
-            WriteLog "Will use $PrefixToUse as device name prefix"
-            Write-Host "Will use $PrefixToUse as device name prefix"
-        }
-        if (-not $skipPrefixSelection) {
-            $serial = (Get-CimInstance -ClassName win32_bios).SerialNumber.Trim()
-            $computername = Set-ConfiguredComputerName($PrefixToUse + $serial)
-        }
-    }
-    elseif ($Unattend -and $UnattendComputerName) {
-        Writelog 'Unattend file found with SerialComputerNames.csv. Getting name for current computer.'
-        $SerialComputerNames = Import-Csv -Path $UnattendComputerNameFile.FullName -Delimiter ","
-
-        $SerialNumber = (Get-CimInstance -Class Win32_Bios).SerialNumber
-        $SCName = $SerialComputerNames | Where-Object { $_.SerialNumber -eq $SerialNumber }
-
-        If ($SCName) {
-            [string]$computername = Set-ConfiguredComputerName($SCName.ComputerName)
-        }
-        else {
-            Writelog 'No matching serial number found in SerialComputerNames.csv. Setting random computer name to complete setup.'
-            Write-Host 'No matching serial number found in SerialComputerNames.csv. Setting random computer name to complete setup.'
-            [string]$computername = Set-ConfiguredComputerName(("FFU-" + ( -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 11 | ForEach-Object { [char]$_ }))))
-        }
-    }
-    elseif ($Unattend -and $RequiresTemplateDeviceName) {
+# Look up device name from asset register, failing that, fall back to serial number
+if ($RequiresTemplateDeviceName -or $RequiresDeviceNameLookup -or $RequiresLegacyDeviceNamePrompt) {
+	$serialNumber = (Get-CimInstance -ClassName Win32_Bios).SerialNumber.Trim()
+	Write-SectionHeader 'Device Name Selection'
+	if ($Unattend -and $RequiresTemplateDeviceName) {
         Writelog 'Unattend file found with a %serial% computer name template. Resolving the template.'
-        $serialNumber = (Get-CimInstance -ClassName Win32_Bios).SerialNumber.Trim()
+        Write-Host 'Unattend file found with a %serial% computer name template. Resolving the template.'
         [string]$computername = Set-ConfiguredComputerName((Resolve-ComputerNameTemplate -computerNameTemplate $UnattendConfiguredComputerName -serialNumber $serialNumber))
     }
-    elseif ($Unattend -and $RequiresLegacyDeviceNamePrompt) {
-        Writelog 'Unattend file found with no prefixes.txt, asking for name'
-        Write-Host 'Unattend file found but no prefixes.txt. Please enter a device name.'
+	elseif ($Unattend -and $RequiresDeviceNameLookup) {
+		Writelog 'Looking up device name in asset register'
+		Write-Host 'Looking up device name in asset register'
+
+        $headers = @{
+            Authorization = "Bearer $($SnipeApiKey)"
+            Accept = "application/json"
+        }
+
+        $response = (Invoke-RestMethod -Uri "$($SnipeURI)/$($serialNumber)" -Method Get -Headers $headers).rows
+
+        if ($response -ne $null){
+            Writelog "Matching asset found. Device name set to $($response.name)."
+            Write-Host "Matching asset found. Device name set to $($response.name)."
+            [string]$computername = "$($response.name)"           
+        } else {
+            Writelog "No matching asset found. Falling back to dynamic %serial% naming."
+            Write-Host "No matching asset found. Falling back to dynamic %serial% naming."
+            [string]$computername = Set-ConfiguredComputerName($serialNumber)
+        }
+	}
+	elseif ($Unattend -and $RequiresLegacyDeviceNamePrompt) {
+        Writelog 'Asking for device name'
+        Write-Host 'Please enter a device name.'
         [string]$computername = Set-ConfiguredComputerName((Read-Host 'Enter device name'))
     }
-    else {
-        WriteLog 'Device naming assets detected without unattend.xml. Skipping device naming prompts.'
-    }
+	else {
+		Writelog 'Unattend file found with a %serial% computer name template. Resolving the template.'
+        Write-Host 'Unattend file found with a %serial% computer name template. Resolving the template.'
+        [string]$computername = Set-ConfiguredComputerName((Resolve-ComputerNameTemplate -computerNameTemplate $UnattendConfiguredComputerName -serialNumber $serialNumber))
+	}
+
 }
 elseif ($Unattend) {
     WriteLog 'Unattend file found. Device naming is not required, but unattend settings will still be applied.'
@@ -1448,313 +980,55 @@ else {
     WriteLog 'No unattend folder found. Device name will be set via PPKG, AP JSON, or default OS name.'
 }
 
-#If both AP and PPKG folder found with files, ask which to use.
-If ($autopilot -eq $true -and $PPKG -eq $true) {
-    WriteLog 'Both PPKG and Autopilot json files found'
-    Write-Host 'Both Autopilot JSON files and Provisioning packages were found.'
-    $APorPPKG = Read-MenuSelection -Prompt 'Enter 1 for Autopilot or 2 for Provisioning Package' -InvalidInputMessage 'Incorrect value. Please enter 1 for Autopilot or 2 for Provisioning Package.' -Minimum 1 -Maximum 2
-    If ($APorPPKG -eq 1) {
-        $PPKG = $false
-    }
-    else {
-        $autopilot = $false
-    } 
-}
-
-#If multiple AP json files found, ask which to install
-If ($APFilesCount -gt 1 -and $autopilot -eq $true) {
-    WriteLog "Found $APFilesCount Autopilot json Files"
-    $array = @()
-
-    for ($i = 0; $i -le $APFilesCount - 1; $i++) {
-        $Properties = [ordered]@{Number = $i + 1 ; APFile = $APFiles[$i].FullName; APFileName = $APFiles[$i].Name }
-        $array += New-Object PSObject -Property $Properties
-    }
-    $array | Format-Table -AutoSize -Property Number, APFileName
-    $APFileSelection = Read-MenuSelection -Prompt 'Enter the AP json file number to install (0 to skip)' -InvalidInputMessage 'Input was not in correct format. Please enter 0 to skip or a valid AP json file number.' -Minimum 1 -Maximum $APFilesCount -AllowSkip
-
-    if ($APFileSelection -eq 0) {
-        $APFileToInstall = $null
-        $APFileName = $null
-        WriteLog 'User chose to skip Autopilot JSON selection.'
-        Write-Host "`nAutopilot JSON selection was skipped."
-    }
-    else {
-        $APFileSelected = $APFileSelection - 1
-        $APFileToInstall = $array[$APFileSelected].APFile
-        $APFileName = $array[$APFileSelected].APFileName
-        WriteLog "$APFileToInstall was selected"
-    }
-}
-elseif ($APFilesCount -eq 1 -and $autopilot -eq $true) {
-    WriteLog "Found $APFilesCount AP File"
-    $APFileToInstall = $APFiles[0].FullName
-    $APFileName = $APFiles[0].Name
-    WriteLog "$APFileToInstall will be copied"
-} 
-else {
-    Writelog 'No AP files found or AP was not selected'
-}
-
-#If multiple PPKG files found, ask which to install
-If ($PPKGFilesCount -gt 1 -and $PPKG -eq $true) {
-    Write-SectionHeader -Title 'Provisioning Package Selection'
-    WriteLog "Found $PPKGFilesCount PPKG Files"
-    $array = @()
-
-    for ($i = 0; $i -le $PPKGFilesCount - 1; $i++) {
-        $Properties = [ordered]@{Number = $i + 1 ; PPKGFile = $PPKGFiles[$i].FullName; PPKGFileName = $PPKGFiles[$i].Name }
-        $array += New-Object PSObject -Property $Properties
-    }
-    $array | Format-Table -AutoSize -Property Number, PPKGFileName
-    $PPKGFileSelection = Read-MenuSelection -Prompt 'Enter the PPKG file number to install (0 to skip)' -InvalidInputMessage 'Input was not in correct format. Please enter 0 to skip or a valid PPKG file number.' -Minimum 1 -Maximum $PPKGFilesCount -AllowSkip
-
-    if ($PPKGFileSelection -eq 0) {
-        $PPKGFileToInstall = $null
-        WriteLog 'User chose to skip Provisioning Package selection.'
-        Write-Host "`nProvisioning Package selection was skipped."
-    }
-    else {
-        $PPKGFileSelected = $PPKGFileSelection - 1
-        $PPKGFileToInstall = $array[$PPKGFileSelected].PPKGFile
-        WriteLog "$PPKGFileToInstall was selected"
-        Write-Host "`n$PPKGFileToInstall will be used"
-    }
-}
-elseif ($PPKGFilesCount -eq 1 -and $PPKG -eq $true) {
-    Write-SectionHeader -Title 'Provisioning Package Selection'
-    WriteLog "Found $PPKGFilesCount PPKG File"
-    Write-Host "Found $PPKGFilesCount PPKG File"
-    $PPKGFileToInstall = $PPKGFiles[0].FullName
-    WriteLog "$PPKGFileToInstall will be used"
-    Write-Host "`n$PPKGFileToInstall will be used"
-} 
-else {
-    Writelog 'No PPKG files found or PPKG not selected.'
-}
-
-#Find Drivers
-$DriversPath = $USBDrive + "Drivers"
+# Find Drivers
+$DriversPath = $DriverRoot
+$DriverManufacturerPath = "$($DriversPath)\$($sysInfoObject.ManufacturerNormalized)"
+$DriverModelPath = Get-ChildItem -Path $DriverManufacturerPath -Directory -Recurse | Where-Object { $_.Name -like "*$($sysInfoObject.ModelNormalized)*" } | Select-Object -First 1
 $DriverSourcePath = $null
 $DriverSourceType = $null # Will be 'WIM' or 'Folder'
-$driverMappingPath = Join-Path -Path $DriversPath -ChildPath "DriverMapping.json"
 
 If (Test-Path -Path $DriversPath) {
     Write-SectionHeader -Title 'Drivers Selection'
 }
 
-# --- Automatic Driver Detection using DriverMapping.json ---
-if (Test-Path -Path $driverMappingPath -PathType Leaf) {
-    WriteLog "DriverMapping.json found at $driverMappingPath. Attempting automatic driver selection."
-    Write-Host "DriverMapping.json found. Attempting automatic driver selection."
-    try {
-        $driverMappings = Get-Content -Path $driverMappingPath | Out-String | ConvertFrom-Json -ErrorAction Stop
-        $driverMappings = @($driverMappings) | Where-Object { $null -ne $_ }
-        if ($driverMappings.Count -eq 0) {
-            throw "DriverMapping.json does not contain any entries."
-        }
+WriteLog "Searching for driver WIM in $DriversPath"
+if ($DriverModelPath) {
+    # Get first WIM file in driver model folder
+    $wimFiles = Get-ChildItem -Path "$($DriverModelPath.FullName)" -Filter *.wim -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
 
-        if ($null -eq $sysInfoObject) {
-            $sysInfoObject = Get-SystemInformation -HardDrive $hardDrive
-        }
+    if ($wimFiles.Count -gt 0){
+        WriteLog "Automatic match found: Manufacturer='$($sysInfoObject.ManufacturerNormalized)', Model='$($sysInfoObject.ModelNormalized)'"
+        Write-Host "Automatic match found: Manufacturer='$($sysInfoObject.ManufacturerNormalized)', Model='$($sysInfoObject.ModelNormalized)'"
+        $DriverSourcePath = $wimFiles.FullName
 
-        $identifierLabelForLog = $null
-        $identifierValueForLog = $null
-        if ($sysInfoObject.PSObject.Properties['Machine Type'] -and -not [string]::IsNullOrWhiteSpace($sysInfoObject.'Machine Type')) {
-            $identifierLabelForLog = 'Machine Type'
-            $identifierValueForLog = $sysInfoObject.'Machine Type'
-        }
-        elseif ($sysInfoObject.PSObject.Properties['System ID'] -and -not [string]::IsNullOrWhiteSpace($sysInfoObject.'System ID')) {
-            $identifierLabelForLog = 'System ID'
-            $identifierValueForLog = $sysInfoObject.'System ID'
-        }
-        else {
-            $identifierLabelForLog = 'System ID'
-            $identifierValueForLog = 'Not Detected'
-        }
-        WriteLog ("Detected System: Manufacturer='{0}', Model='{1}', {2}='{3}'" -f $sysInfoObject.Manufacturer, $sysInfoObject.Model, $identifierLabelForLog, $identifierValueForLog)
-        Write-Host ("Detected System: Manufacturer='{0}', Model='{1}'" -f $sysInfoObject.Manufacturer, $sysInfoObject.Model)
-
-        $matchedRule = Find-DriverMappingRule -SystemInformation $sysInfoObject -DriverMappings $driverMappings
-
-        if ($null -ne $matchedRule) {
-            WriteLog "Automatic match found: Manufacturer='$($matchedRule.Manufacturer)', Model='$($matchedRule.Model)'"
-            Write-Host "Automatic match found: Manufacturer='$($matchedRule.Manufacturer)', Model='$($matchedRule.Model)'"
-            $potentialDriverPath = Join-Path -Path $DriversPath -ChildPath $matchedRule.DriverPath
-
-            if (Test-Path -Path $potentialDriverPath) {
-                $DriverSourcePath = $potentialDriverPath
-                if ($DriverSourcePath -like '*.wim') {
-                    $DriverSourceType = 'WIM'
-                }
-                else {
-                    $DriverSourceType = 'Folder'
-                }
-                WriteLog "Automatically selected driver source. Type: $DriverSourceType, Path: $DriverSourcePath"
-                Write-Host "Automatically selected driver source. Type: $DriverSourceType, Path: $DriverSourcePath"
-            }
-            else {
-                WriteLog "Matched driver path '$potentialDriverPath' not found. Falling back to manual selection."
-                Write-Host "Matched driver path '$potentialDriverPath' not found. Falling back to manual selection."
-            }
-        }
-        else {
-            WriteLog "No automatic driver mapping rule matched identifiers for this system. Falling back to manual selection."
-            Write-Host "No matching driver mapping rule was found for this system. Falling back to manual selection."
-        }
+        WriteLog "Automatically selected driver source. Path: $DriverSourcePath"
+        Write-Host "Automatically selected driver source. Path: $DriverSourcePath"
     }
-    catch {
-        WriteLog "An error occurred during automatic driver detection: $($_.Exception.Message). Falling back to manual selection."
-        Write-Host "An error occurred during automatic driver detection: $($_.Exception.Message). Falling back to manual selection."
+    else {
+        WriteLog "Driver folder exists but no WIM file found."
+        Write-Host "Driver folder exists but no WIM file found."
     }
 }
 else {
-    WriteLog "DriverMapping.json not found. Proceeding with manual driver selection."
+    WriteLog "No drivers found. Manufactuer: $($sysInfoObject.ManufacturerNormalized), Model: $($sysInfoObject.ModelNormalized)"
+    Write-Host "No drivers found. Manufactuer: $($sysInfoObject.ManufacturerNormalized), Model: $($sysInfoObject.ModelNormalized)"
 }
 
-# --- Manual Driver Selection (Fallback) ---
-if ($null -eq $DriverSourcePath) {
-    If (Test-Path -Path $DriversPath) {
-        WriteLog "Searching for driver WIMs and folders in $DriversPath"
-    
-        # Collect all WIM-based driver sources anywhere under Drivers
-        $wimFiles = Get-ChildItem -Path $DriversPath -Filter *.wim -File -Recurse -ErrorAction SilentlyContinue
-        
-        # Treat each immediate child folder as a manufacturer container (supports known and unknown vendors)
-        $manufacturerFolders = Get-ChildItem -Path $DriversPath -Directory -ErrorAction SilentlyContinue
-        $driversRootFullPath = (Get-Item -Path $DriversPath).FullName.TrimEnd('\')
-        $relativePathResolver = {
-            param(
-                [string]$candidatePath,
-                [string]$rootPath
-            )
-            try {
-                $normalizedPath = [System.IO.Path]::GetFullPath($candidatePath)
-                if ($normalizedPath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $relativeSegment = $normalizedPath.Substring($rootPath.Length).TrimStart('\', '/')
-                    if ([string]::IsNullOrWhiteSpace($relativeSegment)) {
-                        return Split-Path -Path $normalizedPath -Leaf
-                    }
-                    return $relativeSegment
-                }
-                return $normalizedPath
-            }
-            catch {
-                return $candidatePath
-            }
-        }
-
-        # Create a combined list
-        $DriverSources = @()
-        foreach ($wimFile in $wimFiles) {
-            $relativePath = & $relativePathResolver -candidatePath $wimFile.FullName -rootPath $driversRootFullPath
-            $DriverSources += [PSCustomObject]@{
-                Type         = 'WIM'
-                Path         = $wimFile.FullName
-                RelativePath = $relativePath
-            }
-        }
-        foreach ($manufacturerFolder in $manufacturerFolders) {
-            $modelFolders = Get-ChildItem -Path $manufacturerFolder.FullName -Directory -ErrorAction SilentlyContinue
-
-            if ($null -eq $modelFolders -or $modelFolders.Count -eq 0) {
-                if (Test-DriverFolderHasInstallableContent -Path $manufacturerFolder.FullName) {
-                    $relativePath = & $relativePathResolver -candidatePath $manufacturerFolder.FullName -rootPath $driversRootFullPath
-                    $DriverSources += [PSCustomObject]@{
-                        Type         = 'Folder'
-                        Path         = $manufacturerFolder.FullName
-                        RelativePath = $relativePath
-                    }
-                    WriteLog "Using manufacturer folder '$($manufacturerFolder.FullName)' as a driver source because it contains installable content."
-                }
-                else {
-                    WriteLog "Skipping '$($manufacturerFolder.FullName)' because it has no model folders with installable content."
-                }
-                continue
-            }
-
-            foreach ($modelFolder in $modelFolders) {
-                if (-not (Test-DriverFolderHasInstallableContent -Path $modelFolder.FullName)) {
-                    WriteLog "Skipping driver folder '$($modelFolder.FullName)' because no installable files were found."
-                    continue
-                }
-                $relativePath = & $relativePathResolver -candidatePath $modelFolder.FullName -rootPath $driversRootFullPath
-                $DriverSources += [PSCustomObject]@{
-                    Type         = 'Folder'
-                    Path         = $modelFolder.FullName
-                    RelativePath = $relativePath
-                }
-            }
-        }
-
-        $DriverSourcesCount = $DriverSources.Count
-
-        if ($DriverSourcesCount -gt 0) {
-            WriteLog "Found $DriverSourcesCount total driver sources (WIMs and folders)."
-            if ($DriverSourcesCount -eq 1) {
-                $DriverSourcePath = $DriverSources[0].Path
-                $DriverSourceType = $DriverSources[0].Type
-                $selectedRelativePath = $DriverSources[0].RelativePath
-                WriteLog "Single driver source found. Type: $DriverSourceType, Path: $DriverSourcePath, RelativePath: $selectedRelativePath"
-                Write-Host "Single driver source found. Type: $DriverSourceType, RelativePath: $selectedRelativePath"
-            }
-            else {
-                # Multiple sources found, prompt user
-                WriteLog "Multiple driver sources found. Prompting for selection."
-                $displayArray = @()
-                for ($i = 0; $i -lt $DriverSourcesCount; $i++) {
-                    $displayArray += [PSCustomObject]@{
-                        Number       = $i + 1
-                        Type         = $DriverSources[$i].Type
-                        RelativePath = $DriverSources[$i].RelativePath
-                        Path         = $DriverSources[$i].Path
-                    }
-                }
-                $displayArray | Format-Table -Property Number, Type, RelativePath -AutoSize
-
-                $DriverSelected = -1
-                $skipDriverInstall = $false
-                $userSelection = Read-MenuSelection -Prompt 'Enter the number of the driver source to install (0 to skip)' -InvalidInputMessage 'Input was not in correct format. Please enter 0 to skip or a valid number.' -Minimum 1 -Maximum $DriverSourcesCount -AllowSkip
-                if ($userSelection -eq 0) {
-                    $skipDriverInstall = $true
-                }
-                else {
-                    $DriverSelected = $userSelection - 1
-                }
-
-                if ($skipDriverInstall) {
-                    $DriverSourcePath = $null
-                    $DriverSourceType = $null
-                    $selectedRelativePath = $null
-                    WriteLog 'User chose to skip driver installation.'
-                    Write-Host "`nDriver installation was skipped."
-                }
-                else {
-                    $DriverSourcePath = $DriverSources[$DriverSelected].Path
-                    $DriverSourceType = $DriverSources[$DriverSelected].Type
-                    $selectedRelativePath = $DriverSources[$DriverSelected].RelativePath
-                    WriteLog "User selected Type: $DriverSourceType, Path: $DriverSourcePath, RelativePath: $selectedRelativePath"
-                    Write-Host "`nUser selected Type: $DriverSourceType, RelativePath: $selectedRelativePath"
-                }
-            }
-        }
-        else {
-            WriteLog "No driver WIMs or folders found in Drivers directory."
-            Write-Host "No driver WIMs or folders found in Drivers directory."
-        }
-    }
-    else {
-        WriteLog "Drivers folder not found at $DriversPath. Skipping driver installation."
-    }
-}
 #Partition drive
-Writelog 'Clean Disk'
+Write-SectionHeader -Title 'Cleaning Disk'
+Writelog 'Cleaning Disk'
 $originalProgressPreference = $ProgressPreference
 try {
     $ProgressPreference = 'SilentlyContinue'
     $Disk = Get-Disk -Number $DiskID
     if ($Disk.PartitionStyle -ne "RAW") {
-        $Disk | clear-disk -RemoveData -RemoveOEM -Confirm:$false
+        WriteLog "Data found on drive - clearing drive..."
+        Write-Host "Data found on drive - clearing drive..."
+        $Disk | Clear-Disk -RemoveData -RemoveOEM -Confirm:$false
+    }
+    else {
+        WriteLog "Drive is already unformatted. Continuing..."
+        Write-Host "Drive is already unformatted. Continuing..."
     }
 }
 catch {
@@ -1764,8 +1038,8 @@ catch {
 finally {
     $ProgressPreference = $originalProgressPreference
 }
-
 Writelog 'Cleaning Disk succeeded'
+Write-Host 'Cleaning Disk succeeded'
 
 #Apply FFU
 Write-SectionHeader -Title 'Applying FFU'
@@ -1798,24 +1072,6 @@ if ($dismExitCode -ne 0) {
 
 WriteLog 'Successfully applied FFU'
 
-function Get-WindowsPartitionFromAppliedDisk {
-    param(
-        [Parameter(Mandatory)]
-        [int]$DiskNumber
-    )
-
-    $basicDataPartitions = @(Get-Partition -DiskNumber $DiskNumber | Where-Object { $_.GptType -eq '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' })
-    foreach ($partition in $basicDataPartitions) {
-        if ([string]::IsNullOrWhiteSpace($partition.DriveLetter)) { continue }
-        $volume = Get-Volume -DriveLetter $partition.DriveLetter -ErrorAction SilentlyContinue
-        if ($null -ne $volume -and $volume.FileSystemLabel -eq 'Windows') {
-            return $partition
-        }
-    }
-
-    return $basicDataPartitions | Select-Object -First 1
-}
-
 # Verify Windows partition exists and assign drive letter
 $windowsPartition = Get-WindowsPartitionFromAppliedDisk -DiskNumber $DiskID
 if ($null -eq $windowsPartition) {
@@ -1825,6 +1081,7 @@ if ($null -eq $windowsPartition) {
 }
 
 WriteLog "Assigning drive letter 'W' to Windows partition."
+Write-Host "Assigning drive letter 'W' to Windows partition."
 Set-Partition -InputObject $windowsPartition -NewDriveLetter W
 
 # Verify the drive letter was set
@@ -1836,18 +1093,10 @@ if ($null -eq $windowsVolume) {
 }
 WriteLog "Successfully assigned drive letter 'W'."
 
-$dataPartitionDriveLetterDeploymentContext = $null
-try {
-    $dataPartitionDriveLetterDeploymentContext = Get-FFUDataPartitionDriveLetterDeploymentContext -WindowsPartitionRoot 'W:\'
-}
-catch {
-    WriteLog "Validating data partition drive-letter deployment artifacts failed with error: $_"
-    Stop-Script -Message "Validating data partition drive-letter deployment artifacts failed with error: $_"
-}
-
 $recoveryPartition = Get-Partition -DiskNumber $DiskID | Where-Object Type -eq Recovery | Select-Object -First 1
 if ($recoveryPartition) {
     WriteLog 'Setting recovery partition attributes'
+    Write-Host 'Setting recovery partition attributes'
     $diskpartScript = @(
         "SELECT DISK $($Disk.Number)",
         "SELECT PARTITION $($recoveryPartition.PartitionNumber)",
@@ -1856,12 +1105,14 @@ if ($recoveryPartition) {
     )
     $diskpartScript | diskpart.exe | Out-Null
     WriteLog 'Setting recovery partition attributes complete'
+    Write-Host 'Setting recovery partition attributes complete'
 }
 
 #Copy modified WinRE if folder exists, else copy inbox WinRE
-$WinRE = $USBDrive + "WinRE\winre.wim"
+$WinRE = "$($DeployRoot)\winre\winre.wim"
 If (Test-Path -Path $WinRE) {
     WriteLog 'Copying modified WinRE to Recovery directory'
+    Write-Host 'Copying modified WinRE to Recovery directory'
     if ($null -eq $recoveryPartition) {
         $errorMessage = 'Recovery partition not found after applying FFU. Cannot copy modified WinRE.'
         WriteLog $errorMessage
@@ -1870,56 +1121,21 @@ If (Test-Path -Path $WinRE) {
     Set-Partition -InputObject $recoveryPartition -NewDriveLetter R
     Invoke-Process xcopy.exe "/h $WinRE R:\Recovery\WindowsRE\ /Y"
     WriteLog 'Copying WinRE to Recovery directory succeeded'
+    Write-Host 'Copying WinRE to Recovery directory succeeded'
     WriteLog 'Registering location of recovery tools'
+    Write-Host 'Registering location of recovery tools'
     Invoke-Process W:\Windows\System32\Reagentc.exe "/Setreimage /Path R:\Recovery\WindowsRE /Target W:\Windows"
     Remove-PartitionAccessPath -InputObject $recoveryPartition -AccessPath R:
     WriteLog 'Registering location of recovery tools succeeded'
+    Write-Host 'Registering location of recovery tools succeeded'
 }
-#Autopilot JSON
-If ($APFileToInstall) {
-    Write-SectionHeader -Title 'Applying Autopilot Configuration'
-    WriteLog "Copying $APFileToInstall to W:\windows\provisioning\autopilot"
-    Invoke-process xcopy.exe "$APFileToInstall W:\Windows\provisioning\autopilot\"
-    WriteLog "Copying $APFileToInstall to W:\windows\provisioning\autopilot succeeded"
-    # Rename file in W:\Windows\Provisioning\Autopilot to AutoPilotConfigurationFile.json
-    try {
-        Rename-Item -Path "W:\Windows\Provisioning\Autopilot\$APFileName" -NewName 'W:\Windows\Provisioning\Autopilot\AutoPilotConfigurationFile.json'
-        WriteLog "Renamed W:\Windows\Provisioning\Autopilot\$APFilename to W:\Windows\Provisioning\Autopilot\AutoPilotConfigurationFile.json"
-    }
-    
-    catch {
-        Writelog "Copying $APFileToInstall to W:\windows\provisioning\autopilot failed with error: $_"
-        throw $_
-    }
-}
-#Apply PPKG
-If ($PPKGFileToInstall) {
-    Write-SectionHeader -Title 'Applying Provisioning Package'
-    try {
-        #Make sure to delete any existing PPKG on the USB drive
-        Get-Childitem -Path $USBDrive\*.ppkg | ForEach-Object {
-            Remove-item -Path $_.FullName
-        }
-        WriteLog "Copying $PPKGFileToInstall to $USBDrive"
-        Write-Host "Copying $PPKGFileToInstall to $USBDrive"
-        # Quote paths to handle PPKG filenames with spaces
-        Invoke-process xcopy.exe """$PPKGFileToInstall"" ""$USBDrive"""
-        WriteLog "Copying $PPKGFileToInstall to $USBDrive succeeded"
-        Write-Host "Copying $PPKGFileToInstall to $USBDrive succeeded"
-    }
 
-    catch {
-        Writelog "Copying $PPKGFileToInstall to $USBDrive failed with error: $_"
-        Write-Host "Copying $PPKGFileToInstall to $USBDrive failed with error: $_"
-        throw $_
-    }
-}
 #Set DeviceName
 If ($Unattend) {
     $unattendSectionTitle = if ($computername) { 'Applying Computer Name and Unattend Configuration' } else { 'Applying Unattend Configuration' }
     Write-SectionHeader -Title $unattendSectionTitle
     try {
-        $PantherDir = 'w:\windows\panther'
+        $PantherDir = "W:\Windows\panther"
         If (Test-Path -Path $PantherDir) {
             Writelog "Copying $UnattendFile to $PantherDir"
             Write-Host "Copying $UnattendFile to $PantherDir"
@@ -1940,218 +1156,123 @@ If ($Unattend) {
     catch {
         WriteLog 'Copying Unattend.xml to Panther failed'
         Stop-Script -Message "Copying Unattend.xml to Panther failed with error: $_"
-    }   
-}
-
-if ($null -ne $dataPartitionDriveLetterDeploymentContext) {
-    $deploymentUnattendPath = 'W:\Windows\Panther\Unattend.xml'
-    try {
-        if ($Unattend) {
-            WriteLog "Merging data partition drive-letter assignment into custom unattend at $deploymentUnattendPath."
-            Add-FFUDataPartitionDriveLetterCommandToAppliedUnattend -UnattendPath $deploymentUnattendPath -ProcessorArchitecture $dataPartitionDriveLetterDeploymentContext.ProcessorArchitecture
-        }
-        else {
-            WriteLog "No custom unattend was supplied. Verifying the FFU-embedded data partition drive-letter command at $deploymentUnattendPath."
-        }
-
-        Test-FFUDataPartitionDriveLetterCommandInAppliedUnattend -UnattendPath $deploymentUnattendPath -ProcessorArchitecture $dataPartitionDriveLetterDeploymentContext.ProcessorArchitecture
-    }
-    catch {
-        WriteLog "Preparing data partition drive-letter deployment hook failed with error: $_"
-        Stop-Script -Message "Preparing data partition drive-letter deployment hook failed with error: $_"
     }
 }
 
 # Add Drivers
 if ($null -ne $DriverSourcePath) {
     Write-SectionHeader -Title 'Installing Drivers'
-    if ($DriverSourceType -eq 'WIM') {
-        WriteLog "Installing drivers from WIM: $DriverSourcePath"
-        Write-Host "Installing drivers from WIM: $DriverSourcePath"
-        $TempDriverDir = "W:\TempDrivers"
-        try {
-            # Create working folder for WIM-based drivers
-            WriteLog "Creating temporary directory for drivers at $TempDriverDir"
-            New-Item -Path $TempDriverDir -ItemType Directory -Force | Out-Null
-            
-            # Mount the driver WIM read-only so DISM can recurse the extracted INF tree
-            WriteLog "Mounting WIM contents to $TempDriverDir"
-            Write-Host "Mounting WIM contents to $TempDriverDir"
-            # For some reason can't use /mount-image with invoke-process, so using dism.exe directly
-            dism.exe /Mount-Image /ImageFile:$DriverSourcePath /Index:1 /MountDir:$TempDriverDir /ReadOnly /optimize
-            $mountExitCode = $LASTEXITCODE
-            if ($mountExitCode -ne 0) {
-                throw "DISM WIM mount failed. LastExitCode = $mountExitCode."
-            }
-            WriteLog "WIM mount successful."
+    WriteLog "Installing drivers from WIM: $DriverSourcePath"
+    Write-Host "Installing drivers from WIM: $DriverSourcePath"
+    $TempDriverDir = "W:\TempDrivers"
+    try {
+        # Create working folder for WIM-based drivers
+        WriteLog "Creating temporary directory for drivers at $TempDriverDir"
+        New-Item -Path $TempDriverDir -ItemType Directory -Force | Out-Null
 
-            # Inject drivers into the offline Windows image; failures here should not stop deployment
-            WriteLog "Injecting drivers from $TempDriverDir"
-            Write-Host "Injecting drivers from $TempDriverDir"
-            Write-Host "This may take a while, please be patient."
-            $driverInjectExitCode = Invoke-Process -FilePath dism.exe -ArgumentList "/image:W:\ /Add-Driver /Driver:""$TempDriverDir"" /Recurse" -IgnoreExitCode -PassThruExitCode
-            if ($driverInjectExitCode -ne 0) {
-                $warningMessage = "Warning: One or more drivers failed to inject from WIM. ExitCode = $driverInjectExitCode. Continuing deployment."
-                WriteLog $warningMessage
-                Write-Host $warningMessage -ForegroundColor Yellow
-
-                # Copy setupapi.offline.log to the USB drive when driver injection fails
-
-                $setupApiLogPath = 'W:\Windows\INF\setupapi.offline.log'
-                if (Test-Path -Path $setupApiLogPath) {
-                    try {
-                        Invoke-Process xcopy.exe """$setupApiLogPath"" ""$USBDrive"" /Y"
-                    }
-                    catch {
-                        WriteLog "Warning: Failed to copy setupapi.offline.log to $USBDrive. "
-                    }
-                }
-                else {
-                    WriteLog "Warning: setupapi.offline.log not found at $setupApiLogPath"
-                }
-            }
-            else {
-                WriteLog "Driver injection from WIM succeeded."
-                Write-Host "Driver injection from WIM succeeded."
-            }
+        # Mount the driver WIM read-only so DISM can recurse the extracted INF tree
+        WriteLog "Mounting WIM contents to $TempDriverDir"
+        Write-Host "Mounting WIM contents to $TempDriverDir"
+        # For some reason can't use /mount-image with invoke-process, so using dism.exe directly
+        dism.exe /Mount-Image /ImageFile:$DriverSourcePath /Index:1 /MountDir:$TempDriverDir /ReadOnly /optimize
+        $mountExitCode = $LASTEXITCODE
+        if ($mountExitCode -ne 0) {
+            throw "DISM WIM mount failed. LastExitCode = $mountExitCode."
         }
-        catch {
-            $warningMessage = "Warning: An error occurred during WIM driver installation. Continuing deployment."
+        WriteLog "WIM mount successful."
+
+        # Inject drivers into the offline Windows image; failures here should not stop deployment
+        WriteLog "Injecting drivers from $TempDriverDir"
+        Write-Host "Injecting drivers from $TempDriverDir"
+        Write-Host "This may take a while, please be patient."
+        $driverInjectExitCode = Invoke-Process -FilePath dism.exe -ArgumentList "/image:W:\ /Add-Driver /Driver:""$TempDriverDir"" /Recurse" -IgnoreExitCode -PassThruExitCode
+        if ($driverInjectExitCode -ne 0) {
+            $warningMessage = "Warning: One or more drivers failed to inject from WIM. ExitCode = $driverInjectExitCode. Continuing deployment."
             WriteLog $warningMessage
             Write-Host $warningMessage -ForegroundColor Yellow
 
-            # Copy troubleshooting logs to the USB drive when driver installation fails
-            try {
-                Invoke-Process cmd.exe "/c copy /Y ""X:\Windows\logs\dism\dism.log"" ""$($USBDrive)dism_driverinject.log"""
-            }
-            catch {
-                WriteLog "Warning: Failed to copy dism.log to $USBDrive."
-            }
-
+            # Copy setupapi.offline.log to DeployRoot when driver injection fails
             $setupApiLogPath = 'W:\Windows\INF\setupapi.offline.log'
             if (Test-Path -Path $setupApiLogPath) {
                 try {
-                    Invoke-Process xcopy.exe """$setupApiLogPath"" ""$USBDrive"" /Y"
+                    Invoke-Process xcopy.exe """$setupApiLogPath"" ""$LogRoot"" /Y"
                 }
                 catch {
-                    WriteLog "Warning: Failed to copy setupapi.offline.log to $USBDrive."
+                    WriteLog "Warning: Failed to copy setupapi.offline.log to $LogRoot. "
                 }
             }
             else {
                 WriteLog "Warning: setupapi.offline.log not found at $setupApiLogPath"
             }
         }
-        finally {
-            if (Test-Path -Path $TempDriverDir) {
-                # Always attempt to unmount and clean up; unmount failures should not stop deployment
-                WriteLog "Unmounting WIM from $TempDriverDir"
-                Write-Host "Unmounting WIM from $TempDriverDir"
-                try {
-                    Invoke-Process dism.exe "/Unmount-Image /MountDir:""$TempDriverDir"" /Discard"
-                    WriteLog "Unmount successful."
-                    Write-Host "Unmount successful."
-                }
-                catch {
-                    $warningMessage = "Warning: Failed to unmount WIM from $TempDriverDir. Continuing cleanup."
-                    WriteLog $warningMessage
-                    Write-Host $warningMessage -ForegroundColor Yellow
-                }
-
-                WriteLog "Cleaning up temporary driver directory: $TempDriverDir"
-                Write-Host "Cleaning up temporary driver directory: $TempDriverDir"
-                try {
-                    Remove-Item -Path $TempDriverDir -Recurse -Force
-                    WriteLog "Cleanup successful."
-                    Write-Host "Cleanup successful."
-                }
-                catch {
-                    $warningMessage = "Warning: Failed to clean up temporary driver directory: $TempDriverDir."
-                    WriteLog $warningMessage
-                    Write-Host $warningMessage -ForegroundColor Yellow
-                }
-            }
+        else {
+            WriteLog "Driver injection from WIM succeeded."
+            Write-Host "Driver injection from WIM succeeded."
         }
     }
-    elseif ($DriverSourceType -eq 'Folder') {
-        $substMapping = $null
+    catch {
+        $warningMessage = "Warning: An error occurred during WIM driver installation. Continuing deployment."
+        WriteLog $warningMessage
+        Write-Host $warningMessage -ForegroundColor Yellow
+
+        # Copy troubleshooting logs to DeployRoot when driver installation fails
         try {
-            # Use SUBST to shorten long paths for DISM /Add-Driver
-            $substMapping = New-DriverSubstMapping -SourcePath $DriverSourcePath
-            $shortDriverPath = $substMapping.DrivePath
-            WriteLog "Injecting drivers from folder via SUBST. Source: $DriverSourcePath, Mapped: $($substMapping.DriveName)"
-            Write-Host "Injecting drivers from folder: $shortDriverPath"
-            Write-Host "This may take a while, please be patient."
-
-            # Inject drivers into the offline Windows image; failures here should not stop deployment
-            $driverInjectExitCode = Invoke-Process -FilePath dism.exe -ArgumentList "/image:W:\ /Add-Driver /Driver:$shortDriverPath /Recurse" -IgnoreExitCode -PassThruExitCode
-            if ($driverInjectExitCode -ne 0) {
-                $warningMessage = "Warning: One or more drivers failed to inject from folder. ExitCode = $driverInjectExitCode. Continuing deployment."
-                WriteLog $warningMessage
-                Write-Host $warningMessage -ForegroundColor Yellow
-
-                # Copy setupapi.offline.log to the USB drive when driver injection fails
-                $setupApiLogPath = 'W:\Windows\INF\setupapi.offline.log'
-                if (Test-Path -Path $setupApiLogPath) {
-                    try {
-                        Invoke-Process xcopy.exe """$setupApiLogPath"" ""$USBDrive"" /Y"
-                    }
-                    catch {
-                        WriteLog "Warning: Failed to copy setupapi.offline.log to $USBDrive. "
-                    }
-                }
-                else {
-                    WriteLog "Warning: setupapi.offline.log not found at $setupApiLogPath"
-                }
-            }
-            else {
-                WriteLog "Driver injection from folder succeeded."
-                Write-Host "Driver injection from folder succeeded."
-            }
+            Invoke-Process cmd.exe "/c copy /Y ""X:\Windows\logs\dism\dism.log"" ""$($LogRoot)dism_driverinject.log"""
         }
         catch {
-            $warningMessage = "Warning: An error occurred during folder driver installation. Continuing deployment."
-            WriteLog $warningMessage
-            Write-Host $warningMessage -ForegroundColor Yellow
+            WriteLog "Warning: Failed to copy dism.log to $LogRoot." 
+        }
 
-            # Copy troubleshooting logs to the USB drive when driver installation fails
+        $setupApiLogPath = 'W:\Windows\INF\setupapi.offline.log'
+        if (Test-Path -Path $setupApiLogPath) {
             try {
-                Invoke-Process xcopy.exe "X:\Windows\logs\dism\dism.log $USBDrive /Y"
+                Invoke-Process xcopy.exe """$setupApiLogPath"" ""$LogRoot"" /Y"
             }
             catch {
-                WriteLog "Warning: Failed to copy dism.log to $USBDrive."
-            }
-
-            $setupApiLogPath = 'W:\Windows\INF\setupapi.offline.log'
-            if (Test-Path -Path $setupApiLogPath) {
-                try {
-                    Invoke-Process xcopy.exe """$setupApiLogPath"" ""$USBDrive"" /Y"
-                }
-                catch {
-                    WriteLog "Warning: Failed to copy setupapi.offline.log to $USBDrive."
-                }
-            }
-            else {
-                WriteLog "Warning: setupapi.offline.log not found at $setupApiLogPath"
+                WriteLog "Warning: Failed to copy setupapi.offline.log to $LogRoot."
             }
         }
-        finally {
-            # Always attempt to remove SUBST mapping; failures here should not stop deployment
-            if ($null -ne $substMapping) {
-                try {
-                    Remove-DriverSubstMapping -DriveLetter $substMapping.DriveLetter
-                }
-                catch {
-                    $warningMessage = "Warning: Failed to remove SUBST mapping $($substMapping.DriveLetter). Continuing deployment."
-                    WriteLog $warningMessage
-                    Write-Host $warningMessage -ForegroundColor Yellow
-                }
+        else {
+            WriteLog "Warning: setupapi.offline.log not found at $setupApiLogPath"
+        }
+    }
+    finally {
+        if (Test-Path -Path $TempDriverDir) {
+            # Always attempt to unmount and clean up; unmount failures should not stop deployment
+            WriteLog "Unmounting WIM from $TempDriverDir"
+            Write-Host "Unmounting WIM from $TempDriverDir"
+            try {
+                Invoke-Process dism.exe "/Unmount-Image /MountDir:""$TempDriverDir"" /Discard"
+                WriteLog "Unmount successful."
+                Write-Host "Unmount successful."
+            }
+            catch {
+                $warningMessage = "Warning: Failed to unmount WIM from $TempDriverDir. Continuing cleanup."
+                WriteLog $warningMessage
+                Write-Host $warningMessage -ForegroundColor Yellow
+            }
+
+            WriteLog "Cleaning up temporary driver directory: $TempDriverDir"
+            Write-Host "Cleaning up temporary driver directory: $TempDriverDir"
+            try {
+                Remove-Item -Path $TempDriverDir -Recurse -Force
+                WriteLog "Cleanup successful."
+                Write-Host "Cleanup successful."
+            }
+            catch {
+                $warningMessage = "Warning: Failed to clean up temporary driver directory: $TempDriverDir."
+                WriteLog $warningMessage
+                Write-Host $warningMessage -ForegroundColor Yellow
             }
         }
     }
 }
 else {
     WriteLog "No drivers to install."
+    Write-Host "No drivers to install."
 }
+
+# Set boot configuration
 Write-SectionHeader -Title 'Setting Boot Configuration'
 WriteLog "Setting Windows Boot Manager to be first in the firmware display order."
 Write-Host "Setting Windows Boot Manager to be first in the firmware display order."
@@ -2159,11 +1280,8 @@ Invoke-Process bcdedit.exe "/set {fwbootmgr} displayorder {bootmgr} /addfirst"
 WriteLog "Setting Windows Boot Manager to be first in the default display order."
 Write-Host "Setting Windows Boot Manager to be first in the default display order."
 Invoke-Process bcdedit.exe "/set {bootmgr} displayorder {default} /addfirst"
+
 #Copy DISM log to USBDrive
-WriteLog "Copying dism log to $USBDrive"
-invoke-process xcopy "X:\Windows\logs\dism\dism.log $USBDrive /Y" 
-WriteLog "Copying dism log to $USBDrive succeeded"
-
-
-
-
+WriteLog "Copying dism log to $LogRoot"
+invoke-process xcopy "X:\Windows\logs\dism\dism.log $LogRoot /Y" 
+WriteLog "Copying dism log to $LogRoot succeeded"
