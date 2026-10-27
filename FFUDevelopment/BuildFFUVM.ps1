@@ -3474,6 +3474,31 @@ function New-RecoveryPartition {
                 $calculatedRecoverySize = $winReWim.Length + 250MB + 32MB
 
                 WriteLog "Calculated space needed for recovery in bytes: $calculatedRecoverySize"
+
+                # Inject PE Drivers in WinRE.wim if PEDrivers exist
+                if ($CopyPEDrivers) {
+                    WriteLog "Creating $FFUDevelopmentPath\Mount directory"
+                    New-Item -Path "$FFUDevelopmentPath\Mount" -ItemType Directory -Force | Out-Null
+                    WriteLog "Created $FFUDevelopmentPath\Mount directory"
+                    WriteLog "Mounting $winReWim to $FFUDevelopmentPath\Mount directory"
+                    Mount-WindowsImage -ImagePath $winReWim.FullName -Index 1 -Path "$FFUDevelopmentPath\Mount" | Out-Null
+                    WriteLog "Mounting complete"
+                    WriteLog "Adding drivers - This will take a few minutes, please be patient"
+                    try {
+                        # Inject drivers using deep SUBST mapping (reuse one drive letter and loop each INF folder)
+                        Invoke-DismDriverInjectionWithSubstLoop -ImagePath "$FFUDevelopmentPath\Mount" -DriverRoot "$PEDriversFolder"
+                    }
+                    catch {
+                        WriteLog "Some drivers failed to be added to WinRE. This can be expected. Continuing."
+                    }
+                    WriteLog "Adding drivers complete"
+                    WriteLog "Dismount $FFUDevelopmentPath\Mount"
+                    Dismount-WindowsImage -Path "$FFUDevelopmentPath\Mount" -Save | Out-Null
+                    WriteLog "Dismount complete"
+                    WriteLog "Remove $FFUDevelopmentPath\Mount folder"
+                    Remove-Item -Path "$FFUDevelopmentPath\Mount" -Recurse -Force | Out-Null
+                    WriteLog "Folder removed"
+                }
             }
             else {
                 WriteLog "No WinRE.WIM found in the OS partition under \Windows\System32\Recovery."
