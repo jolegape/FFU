@@ -1281,6 +1281,39 @@ WriteLog "Setting Windows Boot Manager to be first in the default display order.
 Write-Host "Setting Windows Boot Manager to be first in the default display order."
 Invoke-Process bcdedit.exe "/set {bootmgr} displayorder {default} /addfirst"
 
+# Set TargetEdition
+Write-SectionHeader -Title 'Setting Target OS Edition'
+$oa3ToolOutput = X:\Tools\oa3tool.exe /CheckEdition /ImageDrive=W:
+$NoKeyError = $oa3ToolOutput | Select-String -Pattern "0xC000009E"
+$MisMatchKeyError = $oa3ToolOutput | Select-String -Pattern "0xC00000A6"
+
+if ($NoKeyError) {
+    WriteLog "No embedded OEM key found on this device (0xC000009E). Skipping edition match check."
+    Write-Host "No embedded OEM key found on this device (0xC000009E). Skipping edition match check."
+} elseif ($MisMatchKeyError) {
+    #Get Key Edition
+    $KeyEdition = if (($oa3ToolOutput | Out-String) -match 'Edition of the product key.*:\s*(?:OEM:DM|RETAIL)\s*-\s*(?<KeyEdition>\S+)') { $Matches['KeyEdition'].Trim() }
+
+    #Get Image Edition
+    $ImageEdition = if (($oa3ToolOutput | Out-String) -match 'Edition of(?: the)? OS Image:\s*(?<ImageEdition>\S+)') { $Matches['ImageEdition'].Trim() }
+
+    WriteLog "Mismatch detected. Embedded OEM key edition ($KeyEdition) does not match Windows image ($ImageEdition). Upgrading image to $KeyEdition"
+    Write-Host "Mismatch detected. Embedded OEM key edition ($KeyEdition) does not match Windows image ($ImageEdition). Upgrading image to $KeyEdition"
+
+    dism.exe /Image:W: /Set-Edition:$KeyEdition
+    
+    if ($LASTEXITCODE -eq 0) {
+        WriteLog "Successfully changed image edition to $KeyEdition."
+        Write-Host "Successfully changed image edition to $KeyEdition."
+    } else {
+        WriteLog "DISM failed to change the target edition. Exit code: $LASTEXITCODE"
+        Write-Error "DISM failed to change the target edition. Exit code: $LASTEXITCODE"
+    }
+} else {
+    WriteLog "Could not reliably parse the key or image edition text. Skipping..."
+    Write-Host "Could not reliably parse the key or image edition text. Skipping..."
+}
+
 # Final tweaks
 Write-SectionHeader -Title 'Final Tweaks'
 
