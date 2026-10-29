@@ -1281,6 +1281,52 @@ WriteLog "Setting Windows Boot Manager to be first in the default display order.
 Write-Host "Setting Windows Boot Manager to be first in the default display order."
 Invoke-Process bcdedit.exe "/set {bootmgr} displayorder {default} /addfirst"
 
+# Final tweaks
+Write-SectionHeader -Title 'Final Tweaks'
+
+# Remove the temporary device-encryption setting from offline Windows
+$WindowsPath = 'W:\Windows'
+$SystemHive = Join-Path $WindowsPath 'System32\Config\SYSTEM'
+$MountHive = 'HKLM\FFUOfflineSYSTEM'
+$RegistryRoot = 'Registry::HKEY_LOCAL_MACHINE\FFUOfflineSYSTEM'
+
+Write-Host 'Removing PreventDeviceEncryption from offline Windows...'
+WriteLog 'Removing PreventDeviceEncryption from offline Windows...'
+
+& reg.exe load $MountHive $SystemHive
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to load offline SYSTEM hive: $SystemHive"
+}
+
+try {
+    Get-ChildItem -Path $RegistryRoot |
+        Where-Object { $_.PSChildName -match '^ControlSet\d{3}$' } |
+        ForEach-Object {
+            $BitLockerKey = "$RegistryRoot\$($_.PSChildName)\Control\BitLocker"
+
+            if (Test-Path $BitLockerKey) {
+                Remove-ItemProperty `
+                    -Path $BitLockerKey `
+                    -Name 'PreventDeviceEncryption' `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+
+    Write-Host 'PreventDeviceEncryption removed where present.'
+    WriteLog 'PreventDeviceEncryption removed where present.'
+}
+finally {
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+
+    & reg.exe unload $MountHive
+
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to unload the offline SYSTEM hive.'
+    }
+}
+
 #Copy DISM log to USBDrive
 WriteLog "Copying dism log to $LogRoot"
 invoke-process xcopy "X:\Windows\logs\dism\dism.log $LogRoot /Y" 
